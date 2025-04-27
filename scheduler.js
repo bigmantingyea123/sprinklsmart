@@ -1,4 +1,3 @@
-// scheduler.js
 import cron from 'node-cron';
 import nodemailer from 'nodemailer';
 import fetch from 'node-fetch';
