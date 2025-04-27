@@ -16,6 +16,17 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+/**
+ * GET /
+ * - Requires auth.
+ * - Expects query params: lat, lon, placements,
+ *   availableWater, rootDepth, allowedDepletion,
+ *   efficiency, vegetationType, nozzleType,
+ *   soilType, exposure, slope, cropCoefficient, nozzleRate
+ * - Fetches weather for next 6 days, builds prompt,
+ *   calls OpenAI, parses JSON, saves to User,
+ *   sends notification email, returns parsed schedule.
+ */
 router.get('/', auth, async (req, res) => {
   const {
     lat, lon, placements,
@@ -110,18 +121,17 @@ ${Object.entries(dailyWeatherSummaries)
    .map(([d, s]) => `- ${d}: ${s}`)
    .join("\n")}
 
-Generate a 6-day watering schedule (starting tomorrow) that matches exactly this JSON schema and **nothing else**:
-\`\`\`json
+Generate a 6-day watering schedule (starting tomorrow) in JSON with exactly two keys:
 {
   "dailySchedule": {
     "DayName": [
       { "zone": "Zone 1", "startTime": "8:00 AM", "duration": "15 minutes", "action": "water sprinkler" }
-    ]
+    ],
+    // ...
   },
   "summary": "Concise overall recommendations."
 }
-\`\`\`
-Do not include any prose, markdown, or explanations—**VALID JSON ONLY**.
+Only output valid JSON with exactly these two keys and no extra text.
 `.trim();
 
   try {
@@ -129,34 +139,15 @@ Do not include any prose, markdown, or explanations—**VALID JSON ONLY**.
     const completion = await openai.chat.completions.create({
       model: "o3-mini",
       messages: [
-        {
-          role: "system",
-          content: `
-You are an expert irrigation-AI assistant.
-RESPOND WITH VALID JSON ONLY, matching this EXACT schema below, with no extra keys or text:
-
-{
-  "dailySchedule": { "<Day>": [ { "zone": string, "startTime": string, "duration": string, "action": string } ] },
-  "summary": string
-}
-          `.trim()
-        },
+        { role: "system", content: "You are an expert in irrigation systems, water conservation, and agriculture." },
         { role: "user", content: prompt }
       ],
     });
 
-    let aiRaw = completion.choices?.[0]?.message?.content;
+    const aiRaw = completion.choices?.[0]?.message?.content;
     if (!aiRaw) throw new Error("No AI content returned");
 
-    // 4) Strip any leading/trailing non-JSON
-    aiRaw = aiRaw.trim();
-    const first = aiRaw.indexOf('{');
-    const last  = aiRaw.lastIndexOf('}');
-    if (first > 0 && last > first) {
-      aiRaw = aiRaw.slice(first, last + 1);
-    }
-
-    // 5) Parse the JSON response
+    // 4) Parse the JSON response
     let parsed;
     try {
       parsed = JSON.parse(aiRaw);
@@ -165,13 +156,13 @@ RESPOND WITH VALID JSON ONLY, matching this EXACT schema below, with no extra ke
       throw new Error("AI response is not valid JSON");
     }
 
-    // 6) Save it to the user record
+    // 5) Save it to the user record
     await User.findByIdAndUpdate(req.user.id, {
       aiSchedule: parsed,
       aiScheduleGeneratedAt: new Date()
     });
 
-    // 7) Email notification
+    // 6) Email notification
     const user = await User.findById(req.user.id);
     if (user?.email) {
       await sendEmailNotification(
@@ -181,7 +172,7 @@ RESPOND WITH VALID JSON ONLY, matching this EXACT schema below, with no extra ke
       );
     }
 
-    // 8) Return the JSON
+    // 7) Return the schedule
     return res.json({ aiSchedule: parsed });
 
   } catch (err) {
