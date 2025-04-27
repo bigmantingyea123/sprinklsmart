@@ -1,5 +1,4 @@
 // server.js
-
 import express from 'express';
 import mongoose from 'mongoose';
 import dotenv from 'dotenv';
@@ -9,17 +8,15 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Parse JSON bodies
-app.use(express.json());
+// allow CORS from localhost:3000 (and anywhere, if you like)
+app.use(cors({
+  origin: ['http://localhost:3000', 'https://your-frontend-url.com'],
+  methods: ['GET','POST','PUT','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','x-auth-token'],
+  credentials: true
+}));
 
-// Enable CORS for our React dev server
-app.use(
-  cors({
-    origin: 'http://localhost:3000',
-    methods: ['GET','POST','PUT','DELETE','OPTIONS'],
-    allowedHeaders: ['Content-Type','x-auth-token']
-  })
-);
+app.use(express.json());
 
 try {
   await mongoose.connect(process.env.MONGO_URI, {
@@ -31,9 +28,8 @@ try {
   console.error('MongoDB connection error:', error);
 }
 
-// Import routes
+// your existing route imports...
 import authRoutes from './routes/auth.js';
-import googleAuthRoutes from './routes/authGoogle.js';
 import placementsRoutes from './routes/placements.js';
 import weatherRoutes from './routes/weather.js';
 import scheduleRoutes from './routes/schedule.js';
@@ -42,9 +38,9 @@ import getAiScheduleRoutes from './routes/getAiSchedule.js';
 import updateAddressRoutes from './routes/updateAddress.js';
 import updateMapSettingsRoutes from './routes/updateMapSettings.js';
 import updateSettingsRoutes from './routes/updateSettings.js';
+import googleAuthRoutes from './routes/authGoogle.js';
 
 app.use('/api/auth', authRoutes);
-app.use('/api/auth', googleAuthRoutes);
 app.use('/api/placements', placementsRoutes);
 app.use('/api/weather', weatherRoutes);
 app.use('/api/schedule', scheduleRoutes);
@@ -53,12 +49,12 @@ app.use('/api/ai-saved', getAiScheduleRoutes);
 app.use('/api/update-address', updateAddressRoutes);
 app.use('/api/map-settings', updateMapSettingsRoutes);
 app.use('/api/settings', updateSettingsRoutes);
+app.use('/api/auth', googleAuthRoutes);
 
 app.get('/', (req, res) => {
   res.send('Hello, welcome to your Smart Sprinkler App!');
 });
 
-// Kick off any scheduled jobs
 import './scheduler.js';
 
 app.listen(PORT, () => {
