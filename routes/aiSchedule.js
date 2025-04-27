@@ -53,9 +53,9 @@ router.get('/', auth, async (req, res) => {
   // 1) Build 6-day weather summaries
   let dailyWeatherSummaries = {};
   try {
-    // → append a cache-buster so Heroku never returns 304
+    // ← here’s the only change: use BASE_URL instead of hard-coded localhost:3000
     const weatherRes = await fetch(
-      `${BASE_URL}/api/weather?lat=${lat}&lon=${lon}&_=${Date.now()}`
+      `${BASE_URL}/api/weather?lat=${lat}&lon=${lon}`
     );
     const weatherJson = weatherRes.ok ? await weatherRes.json() : null;
 
@@ -101,7 +101,7 @@ router.get('/', auth, async (req, res) => {
     dailyWeatherSummaries = { Error: "Weather data unavailable." };
   }
 
-  // 2) Build the AI prompt (unchanged)…
+  // 2) Build the AI prompt
   const prompt = `
 I manage a smart sprinkler system with:
 - Lat/Lon: ${lat}, ${lon}
@@ -141,7 +141,7 @@ Only output valid JSON with exactly these two keys and no extra text.
 `.trim();
 
   try {
-    // 3) Call OpenAI…
+    // 3) Call OpenAI
     const completion = await openai.chat.completions.create({
       model: "o3-mini",
       messages: [
@@ -153,7 +153,7 @@ Only output valid JSON with exactly these two keys and no extra text.
     const aiRaw = completion.choices?.[0]?.message?.content;
     if (!aiRaw) throw new Error("No AI content returned");
 
-    // 4) Parse JSON…
+    // 4) Parse the JSON response
     let parsed;
     try {
       parsed = JSON.parse(aiRaw);
@@ -162,11 +162,13 @@ Only output valid JSON with exactly these two keys and no extra text.
       throw new Error("AI response is not valid JSON");
     }
 
-    // 5) Save, 6) Email, 7) Return  (all unchanged)
+    // 5) Save it to the user record
     await User.findByIdAndUpdate(req.user.id, {
       aiSchedule: parsed,
       aiScheduleGeneratedAt: new Date()
     });
+
+    // 6) Email notification
     const user = await User.findById(req.user.id);
     if (user?.email) {
       await sendEmailNotification(
@@ -175,6 +177,8 @@ Only output valid JSON with exactly these two keys and no extra text.
         "Your new watering schedule is ready. Check your dashboard for details."
       );
     }
+
+    // 7) Return the schedule
     return res.json({ aiSchedule: parsed });
 
   } catch (err) {
@@ -187,7 +191,9 @@ Only output valid JSON with exactly these two keys and no extra text.
 });
 
 /**
- * GET /ai-saved (unchanged)
+ * GET /ai-saved
+ * - Requires auth.
+ * - Returns the saved aiSchedule if it exists and was generated within the last 7 days.
  */
 router.get('/ai-saved', auth, async (req, res) => {
   const user = await User.findById(req.user.id);
@@ -196,7 +202,7 @@ router.get('/ai-saved', auth, async (req, res) => {
     !user.aiScheduleGeneratedAt ||
     (Date.now() - user.aiScheduleGeneratedAt.getTime()) > 7 * 24 * 60 * 60 * 1000
   ) {
-    return res.json({});
+    return res.json({}); // none or expired
   }
   return res.json({ aiSchedule: user.aiSchedule });
 });
