@@ -1,25 +1,23 @@
 // routes/updateAddress.js
 import express from 'express';
-import dotenv from 'dotenv';
 import auth from '../middleware/auth.js';
 import User from '../models/User.js';
 
-dotenv.config();
-
 const router = express.Router();
 
+// Protected endpoint to update the user's address and map settings
 router.put('/', auth, async (req, res) => {
-  const { address } = req.body;
-  if (!address) {
-    return res.status(400).json({ msg: "Address is required" });
+  const { address, coords } = req.body;
+  if (!address || !coords) {
+    return res.status(400).json({ msg: "Address and coordinates are required" });
   }
   try {
-    const user = await User.findByIdAndUpdate(
+    const updatedUser = await User.findByIdAndUpdate(
       req.user.id,
-      { address },
+      { address, "mapSettings.center": coords },
       { new: true }
     );
-    res.json({ address: user.address });
+    res.json({ address: updatedUser.address, mapSettings: updatedUser.mapSettings });
   } catch (err) {
     console.error(err.message);
     res.status(500).send('Server error');
