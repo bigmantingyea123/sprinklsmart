@@ -7,7 +7,7 @@ import OpenAI from 'openai';
 import fetch from 'node-fetch';
 import User from '../models/User.js';
 import auth from '../middleware/auth.js';
-//import { sendEmailNotification } from '../emailNotifications.js';
+import { sendEmailNotification } from '../emailNotifications.js';
 
 const router = express.Router();
 
@@ -20,38 +20,76 @@ const openai = new OpenAI({
  * GET /
  * - Requires auth.
  * - Expects query params: lat, lon, placements,
- *   availableWater, rootDepth, allowedDepletion,
- *   efficiency, vegetationType, nozzleType,
- *   soilType, exposure, slope, cropCoefficient, nozzleRate
- * - Fetches weather for next 6 days, builds prompt,
- *   calls OpenAI, parses JSON, saves to User,
- *   sends notification email, returns parsed schedule.
+ *   plus the 11 system settings (optional if saved already)
  */
 router.get('/', auth, async (req, res) => {
   const {
-    lat, lon, placements,
-    availableWater, rootDepth, allowedDepletion,
-    efficiency, vegetationType, nozzleType,
-    soilType, exposure, slope,
-    cropCoefficient, nozzleRate
+    lat,
+    lon,
+    placements,
+    availableWater: qAvailableWater,
+    rootDepth: qRootDepth,
+    allowedDepletion: qAllowedDepletion,
+    efficiency: qEfficiency,
+    cropCoefficient: qCropCoefficient,
+    nozzleRate: qNozzleRate,
+    vegetationType: qVegetationType,
+    nozzleType: qNozzleType,
+    soilType: qSoilType,
+    exposure: qExposure,
+    slope: qSlope,
   } = req.query;
 
-  // Validate required params
-  if (!lat || !lon) {
-    return res.status(400).json({ error: "lat and lon query parameters are required" });
-  }
-  if (
-    !availableWater || !rootDepth || !allowedDepletion ||
-    !efficiency || !vegetationType || !nozzleType ||
-    !soilType || !exposure || !slope
-  ) {
-    return res.status(400).json({ error: "All core system settings must be provided" });
+  // 1️⃣ Require only lat, lon & placements
+  if (!lat || !lon || !placements) {
+    return res
+      .status(400)
+      .json({ error: "lat, lon and placements query parameters are required" });
   }
 
-  // 1) Build 6-day weather summaries
+  // 2️⃣ Load user and pull saved systemSettings as fallback
+  const user = await User.findById(req.user.id);
+  const ss = user.systemSettings || {};
+
+  const availableWater   = qAvailableWater   || ss.availableWater;
+  const rootDepth        = qRootDepth        || ss.rootDepth;
+  const allowedDepletion = qAllowedDepletion || ss.allowedDepletion;
+  const efficiency       = qEfficiency       || ss.efficiency;
+  const cropCoefficient  = qCropCoefficient  || ss.cropCoefficient;
+  const nozzleRate       = qNozzleRate       || ss.nozzleRate;
+  const vegetationType   = qVegetationType   || ss.vegetationType;
+  const nozzleType       = qNozzleType       || ss.nozzleType;
+  const soilType         = qSoilType         || ss.soilType;
+  const exposure         = qExposure         || ss.exposure;
+  const slope            = qSlope            || ss.slope;
+
+  // 3️⃣ If after fallback any core setting is still missing, error
+  if (
+    availableWater == null ||
+    rootDepth == null ||
+    allowedDepletion == null ||
+    efficiency == null ||
+    cropCoefficient == null ||
+    nozzleRate == null ||
+    !vegetationType ||
+    !nozzleType ||
+    !soilType ||
+    !exposure ||
+    slope == null
+  ) {
+    return res.status(400).json({
+      error:
+        "Missing system settings. Please visit your Settings page and save your system settings."
+    });
+  }
+
+  // 4️⃣ Build 6-day weather summaries
   let dailyWeatherSummaries = {};
   try {
-    const weatherRes = await fetch(`http://localhost:3000/api/weather?lat=${lat}&lon=${lon}`);
+    const weatherRes = await fetch(
+      `http://localhost:${process.env.PORT || 3000}` +
+      `/api/weather?lat=${lat}&lon=${lon}`
+    );
     const weatherJson = weatherRes.ok ? await weatherRes.json() : null;
     const dayNames = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
     const start = new Date();
@@ -95,7 +133,7 @@ router.get('/', auth, async (req, res) => {
     dailyWeatherSummaries = { Error: "Weather data unavailable." };
   }
 
-  // 2) Build the AI prompt
+  // 5️⃣ Build the AI prompt
   const prompt = `
 I manage a smart sprinkler system with:
 - Lat/Lon: ${lat}, ${lon}
@@ -135,7 +173,7 @@ Only output valid JSON with exactly these two keys and no extra text.
 `.trim();
 
   try {
-    // 3) Call OpenAI
+    // 6️⃣ Call OpenAI
     const completion = await openai.chat.completions.create({
       model: "o3-mini",
       messages: [
@@ -147,7 +185,7 @@ Only output valid JSON with exactly these two keys and no extra text.
     const aiRaw = completion.choices?.[0]?.message?.content;
     if (!aiRaw) throw new Error("No AI content returned");
 
-    // 4) Parse the JSON response
+    // 7️⃣ Parse the JSON response
     let parsed;
     try {
       parsed = JSON.parse(aiRaw);
@@ -156,15 +194,14 @@ Only output valid JSON with exactly these two keys and no extra text.
       throw new Error("AI response is not valid JSON");
     }
 
-    // 5) Save it to the user record
+    // 8️⃣ Save it to the user record
     await User.findByIdAndUpdate(req.user.id, {
       aiSchedule: parsed,
       aiScheduleGeneratedAt: new Date()
     });
 
-    // 6) Email notification
-    const user = await User.findById(req.user.id);
-    if (user?.email) {
+    // 9️⃣ Email notification
+    if (user.email) {
       await sendEmailNotification(
         user.email,
         "New AI Watering Schedule Generated",
@@ -172,7 +209,7 @@ Only output valid JSON with exactly these two keys and no extra text.
       );
     }
 
-    // 7) Return the schedule
+    // 🔟 Return the schedule
     return res.json({ aiSchedule: parsed });
 
   } catch (err) {
