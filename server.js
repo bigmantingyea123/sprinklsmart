@@ -11,15 +11,16 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(cors());
 
+// MongoDB connection
 mongoose
   .connect(process.env.MONGO_URI, {
     useNewUrlParser: true,
     useUnifiedTopology: true
   })
   .then(() => console.log('MongoDB connected'))
-  .catch((err) => console.error('MongoDB connection error:', err));
+  .catch(err => console.error('MongoDB connection error:', err));
 
-// ——— Import only the route files you have in /routes ———
+// ——— Import only the routes you actually have in /routes ———
 import authRoutes              from './routes/auth.js';
 import placementsRoutes        from './routes/placements.js';
 import weatherRoutes           from './routes/weather.js';
@@ -28,24 +29,22 @@ import aiScheduleRoutes        from './routes/aiSchedule.js';
 import updateAddressRoutes     from './routes/updateAddress.js';
 import updateMapSettingsRoutes from './routes/updateMapSettings.js';
 import updateSettingsRoutes    from './routes/updateSettings.js';
-// (no authGoogle.js or getAiSchedule.js here)
 
-app.use('/api/auth', authRoutes);
-app.use('/api/placements', placementsRoutes);
-app.use('/api/weather', weatherRoutes);
-app.use('/api/schedule', scheduleRoutes);
-app.use('/api/ai-schedule', aiScheduleRoutes);
-app.use('/api/update-address', updateAddressRoutes);
-app.use('/api/map-settings', updateMapSettingsRoutes);
-app.use('/api/settings', updateSettingsRoutes);
+app.use('/api/auth',         authRoutes);
+app.use('/api/placements',   placementsRoutes);
+app.use('/api/weather',      weatherRoutes);
+app.use('/api/schedule',     scheduleRoutes);
+app.use('/api/ai-schedule',  aiScheduleRoutes);
+app.use('/api/update-address',   updateAddressRoutes);
+app.use('/api/map-settings',     updateMapSettingsRoutes);
+app.use('/api/settings',         updateSettingsRoutes);
 
-app.get('/', (req, res) => {
-  res.send('Hello, welcome to your Smart Sprinkler App!');
-});
+// Health check
+app.get('/', (req, res) => res.send('Smart Sprinkler API up and running'));
 
-// if you have any startup tasks:
+// Optional scheduler bootstrap
 import './scheduler.js';
 
 app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+  console.log(`Server listening on port ${PORT}`);
 });
