@@ -7,7 +7,7 @@ import OpenAI from 'openai';
 import fetch from 'node-fetch';
 import User from '../models/User.js';
 import auth from '../middleware/auth.js';
-import { sendEmailNotification } from '../emailNotifications.js';
+//import { sendEmailNotification } from '../emailNotifications.js';
 
 const router = express.Router();
 
