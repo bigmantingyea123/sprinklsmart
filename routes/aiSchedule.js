@@ -36,7 +36,7 @@ router.get('/', auth, async (req, res) => {
     cropCoefficient, nozzleRate
   } = req.query;
 
-  // Validate required params
+  // 1) Validate required params
   if (!lat || !lon) {
     return res.status(400).json({ error: "lat and lon query parameters are required" });
   }
@@ -48,17 +48,20 @@ router.get('/', auth, async (req, res) => {
     return res.status(400).json({ error: "All core system settings must be provided" });
   }
 
-  // 1) Build 6-day weather summaries
+  // 2) Build 6-day weather summaries
   let dailyWeatherSummaries = {};
   try {
-    const weatherRes = await fetch(`http://localhost:3000/api/weather?lat=${lat}&lon=${lon}`);
+    // use BASE_URL in production, fallback to localhost for dev
+    const baseUrl = process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
+    const weatherRes = await fetch(`${baseUrl}/api/weather?lat=${lat}&lon=${lon}`);
     const weatherJson = weatherRes.ok ? await weatherRes.json() : null;
+
     const dayNames = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
     const start = new Date();
-    start.setDate(start.getDate()+1);
+    start.setDate(start.getDate() + 1);
     start.setHours(0,0,0,0);
 
-    // Initialize next 6 days
+    // init
     for (let i = 0; i < 6; i++) {
       const d = new Date(start);
       d.setDate(start.getDate() + i);
@@ -69,10 +72,7 @@ router.get('/', auth, async (req, res) => {
       weatherJson.list.forEach(f => {
         const dt = new Date(f.dt_txt);
         const dayName = dayNames[dt.getDay()];
-        if (
-          dt >= start &&
-          dt < new Date(start.getTime() + 6*24*60*60*1000)
-        ) {
+        if (dt >= start && dt < new Date(start.getTime() + 6*24*60*60*1000)) {
           const h = dt.getHours();
           if ((h >= 8 && h < 10) || (h >= 14 && h < 16)) {
             dailyWeatherSummaries[dayName].push(
@@ -83,7 +83,6 @@ router.get('/', auth, async (req, res) => {
       });
     }
 
-    // Convert arrays to summary strings
     for (const day in dailyWeatherSummaries) {
       const arr = dailyWeatherSummaries[day];
       dailyWeatherSummaries[day] = arr.length
@@ -92,10 +91,13 @@ router.get('/', auth, async (req, res) => {
     }
   } catch (err) {
     console.error("Weather fetch error:", err);
-    dailyWeatherSummaries = { Error: "Weather data unavailable." };
+    // leave dailyWeatherSummaries empty so AI sees "No forecast available."
+    Object.keys(dailyWeatherSummaries).forEach(d => {
+      dailyWeatherSummaries[d] = "No forecast available.";
+    });
   }
 
-  // 2) Build the AI prompt
+  // 3) Build the AI prompt
   const prompt = `
 I manage a smart sprinkler system with:
 - Lat/Lon: ${lat}, ${lon}
@@ -126,8 +128,7 @@ Generate a 6-day watering schedule (starting tomorrow) in JSON with exactly two 
   "dailySchedule": {
     "DayName": [
       { "zone": "Zone 1", "startTime": "8:00 AM", "duration": "15 minutes", "action": "water sprinkler" }
-    ],
-    // ...
+    ]
   },
   "summary": "Concise overall recommendations."
 }
@@ -135,7 +136,7 @@ Only output valid JSON with exactly these two keys and no extra text.
 `.trim();
 
   try {
-    // 3) Call OpenAI
+    // 4) Call OpenAI
     const completion = await openai.chat.completions.create({
       model: "o3-mini",
       messages: [
@@ -147,7 +148,7 @@ Only output valid JSON with exactly these two keys and no extra text.
     const aiRaw = completion.choices?.[0]?.message?.content;
     if (!aiRaw) throw new Error("No AI content returned");
 
-    // 4) Parse the JSON response
+    // 5) Parse the JSON response
     let parsed;
     try {
       parsed = JSON.parse(aiRaw);
@@ -156,13 +157,13 @@ Only output valid JSON with exactly these two keys and no extra text.
       throw new Error("AI response is not valid JSON");
     }
 
-    // 5) Save it to the user record
+    // 6) Save it to the user record
     await User.findByIdAndUpdate(req.user.id, {
       aiSchedule: parsed,
       aiScheduleGeneratedAt: new Date()
     });
 
-    // 6) Email notification
+    // 7) Email notification
     const user = await User.findById(req.user.id);
     if (user?.email) {
       await sendEmailNotification(
@@ -172,7 +173,7 @@ Only output valid JSON with exactly these two keys and no extra text.
       );
     }
 
-    // 7) Return the schedule
+    // 8) Return the schedule
     return res.json({ aiSchedule: parsed });
 
   } catch (err) {
