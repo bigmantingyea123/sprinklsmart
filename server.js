@@ -1,4 +1,3 @@
-// server.js
 import express from 'express';
 import mongoose from 'mongoose';
 import dotenv from 'dotenv';
@@ -9,41 +8,45 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
-// allow all origins — adjust in production if you need to lock this down
 app.use(cors());
 
-// connect to MongoDB
-try {
-  await mongoose.connect(process.env.MONGO_URI);
-  console.log('MongoDB connected');
-} catch (err) {
-  console.error('MongoDB connection error:', err);
-  process.exit(1);
-}
+(async () => {
+  try {
+    await mongoose.connect(process.env.MONGO_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true
+    });
+    console.log('MongoDB connected');
+  } catch (error) {
+    console.error('MongoDB connection error:', error);
+    process.exit(1);
+  }
+})();
 
-// your route imports
-import authRoutes       from './routes/auth.js';
-import placementsRoutes from './routes/placements.js';
-import weatherRoutes    from './routes/weather.js';
-import scheduleRoutes   from './routes/schedule.js';
-import aiScheduleRoutes from './routes/aiSchedule.js';
-import updateAddress    from './routes/updateAddress.js';
-import mapSettings      from './routes/updateMapSettings.js';
-import settingsRoutes   from './routes/updateSettings.js';
+// Import only the routes you actually have
+import authRoutes              from './routes/auth.js';
+import placementsRoutes        from './routes/placements.js';
+import weatherRoutes           from './routes/weather.js';
+import scheduleRoutes          from './routes/schedule.js';
+import aiScheduleRoutes        from './routes/aiSchedule.js';
+import updateAddressRoutes     from './routes/updateAddress.js';
+import updateMapSettingsRoutes from './routes/updateMapSettings.js';
+import updateSettingsRoutes    from './routes/updateSettings.js';
 
-// mount only the ones you have on disk
-app.use('/api/auth',        authRoutes);
-app.use('/api/placements',  placementsRoutes);
-app.use('/api/weather',     weatherRoutes);
-app.use('/api/schedule',    scheduleRoutes);
-app.use('/api/ai-schedule', aiScheduleRoutes);
-app.use('/api/update-address',  updateAddress);
-app.use('/api/map-settings',    mapSettings);
-app.use('/api/settings',        settingsRoutes);
+app.use('/api/auth',          authRoutes);
+app.use('/api/placements',    placementsRoutes);
+app.use('/api/weather',       weatherRoutes);
+app.use('/api/schedule',      scheduleRoutes);
+app.use('/api/ai-schedule',   aiScheduleRoutes);
+app.use('/api/update-address',  updateAddressRoutes);
+app.use('/api/map-settings',    updateMapSettingsRoutes);
+app.use('/api/settings',        updateSettingsRoutes);
 
-app.get('/', (req, res) => res.send('Hello, Sprinkler API is up!'));
+app.get('/', (_req, res) => {
+  res.send('Hello, welcome to your Smart Sprinkler App!');
+});
 
-// if you have a scheduler file
+// If you have scheduled jobs:
 import './scheduler.js';
 
 app.listen(PORT, () => {
