@@ -16,101 +16,74 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+// Default values if neither query nor saved settings exist
+const DEFAULTS = {
+  availableWater: '6',      // inches
+  rootDepth: '12',          // inches
+  allowedDepletion: '50',   // percent
+  efficiency: '75',         // percent
+  cropCoefficient: '0.8',
+  nozzleRate: '1.2',        // in/hr
+  vegetationType: 'grass',
+  nozzleType: 'rotor',
+  soilType: 'loam',
+  exposure: 'full sun',
+  slope: 'flat',
+};
+
 /**
  * GET /
  * - Requires auth.
  * - Expects query params: lat, lon, placements,
- *   plus the 11 system settings (optional if saved already)
+ *   plus any of the 11 systemSettings (availableWater, rootDepth, …, slope).
+ * - Falls back to user.systemSettings, then DEFAULTS.
+ * - Fetches weather for next 6 days, builds prompt,
+ *   calls OpenAI, parses JSON, saves to User,
+ *   emails the user, returns parsed schedule.
  */
 router.get('/', auth, async (req, res) => {
-  const {
-    lat,
-    lon,
-    placements,
-    availableWater: qAvailableWater,
-    rootDepth: qRootDepth,
-    allowedDepletion: qAllowedDepletion,
-    efficiency: qEfficiency,
-    cropCoefficient: qCropCoefficient,
-    nozzleRate: qNozzleRate,
-    vegetationType: qVegetationType,
-    nozzleType: qNozzleType,
-    soilType: qSoilType,
-    exposure: qExposure,
-    slope: qSlope,
-  } = req.query;
-
-  // 1️⃣ Require only lat, lon & placements
-  if (!lat || !lon || !placements) {
-    return res
-      .status(400)
-      .json({ error: "lat, lon and placements query parameters are required" });
+  const { lat, lon, placements } = req.query;
+  if (!lat || !lon) {
+    return res.status(400).json({ error: "lat and lon query parameters are required" });
   }
 
-  // 2️⃣ Load user and pull saved systemSettings as fallback
+  // 1) Fetch the user (to get saved settings & email)
   const user = await User.findById(req.user.id);
   const ss = user.systemSettings || {};
 
-  const availableWater   = qAvailableWater   || ss.availableWater;
-  const rootDepth        = qRootDepth        || ss.rootDepth;
-  const allowedDepletion = qAllowedDepletion || ss.allowedDepletion;
-  const efficiency       = qEfficiency       || ss.efficiency;
-  const cropCoefficient  = qCropCoefficient  || ss.cropCoefficient;
-  const nozzleRate       = qNozzleRate       || ss.nozzleRate;
-  const vegetationType   = qVegetationType   || ss.vegetationType;
-  const nozzleType       = qNozzleType       || ss.nozzleType;
-  const soilType         = qSoilType         || ss.soilType;
-  const exposure         = qExposure         || ss.exposure;
-  const slope            = qSlope            || ss.slope;
+  // 2) Resolve each setting: query → saved → default
+  const availableWater   = req.query.availableWater   || ss.availableWater   || DEFAULTS.availableWater;
+  const rootDepth        = req.query.rootDepth        || ss.rootDepth        || DEFAULTS.rootDepth;
+  const allowedDepletion = req.query.allowedDepletion || ss.allowedDepletion || DEFAULTS.allowedDepletion;
+  const efficiency       = req.query.efficiency       || ss.efficiency       || DEFAULTS.efficiency;
+  const cropCoefficient  = req.query.cropCoefficient  || ss.cropCoefficient  || DEFAULTS.cropCoefficient;
+  const nozzleRate       = req.query.nozzleRate       || ss.nozzleRate       || DEFAULTS.nozzleRate;
+  const vegetationType   = req.query.vegetationType   || ss.vegetationType   || DEFAULTS.vegetationType;
+  const nozzleType       = req.query.nozzleType       || ss.nozzleType       || DEFAULTS.nozzleType;
+  const soilType         = req.query.soilType         || ss.soilType         || DEFAULTS.soilType;
+  const exposure         = req.query.exposure         || ss.exposure         || DEFAULTS.exposure;
+  const slope            = req.query.slope            || ss.slope            || DEFAULTS.slope;
 
-  // 3️⃣ If after fallback any core setting is still missing, error
-  if (
-    availableWater == null ||
-    rootDepth == null ||
-    allowedDepletion == null ||
-    efficiency == null ||
-    cropCoefficient == null ||
-    nozzleRate == null ||
-    !vegetationType ||
-    !nozzleType ||
-    !soilType ||
-    !exposure ||
-    slope == null
-  ) {
-    return res.status(400).json({
-      error:
-        "Missing system settings. Please visit your Settings page and save your system settings."
-    });
-  }
-
-  // 4️⃣ Build 6-day weather summaries
+  // 3) Build 6-day weather summaries
   let dailyWeatherSummaries = {};
   try {
-    const weatherRes = await fetch(
-      `http://localhost:${process.env.PORT || 3000}` +
-      `/api/weather?lat=${lat}&lon=${lon}`
-    );
+    const weatherRes = await fetch(`http://localhost:3000/api/weather?lat=${lat}&lon=${lon}`);
     const weatherJson = weatherRes.ok ? await weatherRes.json() : null;
     const dayNames = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
     const start = new Date();
     start.setDate(start.getDate()+1);
     start.setHours(0,0,0,0);
 
-    // Initialize next 6 days
     for (let i = 0; i < 6; i++) {
       const d = new Date(start);
       d.setDate(start.getDate() + i);
       dailyWeatherSummaries[dayNames[d.getDay()]] = [];
     }
-
     if (weatherJson?.list) {
       weatherJson.list.forEach(f => {
         const dt = new Date(f.dt_txt);
         const dayName = dayNames[dt.getDay()];
-        if (
-          dt >= start &&
-          dt < new Date(start.getTime() + 6*24*60*60*1000)
-        ) {
+        if (dt >= start && dt < new Date(start.getTime() + 6*24*60*60*1000)) {
           const h = dt.getHours();
           if ((h >= 8 && h < 10) || (h >= 14 && h < 16)) {
             dailyWeatherSummaries[dayName].push(
@@ -120,8 +93,6 @@ router.get('/', auth, async (req, res) => {
         }
       });
     }
-
-    // Convert arrays to summary strings
     for (const day in dailyWeatherSummaries) {
       const arr = dailyWeatherSummaries[day];
       dailyWeatherSummaries[day] = arr.length
@@ -133,7 +104,7 @@ router.get('/', auth, async (req, res) => {
     dailyWeatherSummaries = { Error: "Weather data unavailable." };
   }
 
-  // 5️⃣ Build the AI prompt
+  // 4) Build the AI prompt
   const prompt = `
 I manage a smart sprinkler system with:
 - Lat/Lon: ${lat}, ${lon}
@@ -164,8 +135,7 @@ Generate a 6-day watering schedule (starting tomorrow) in JSON with exactly two 
   "dailySchedule": {
     "DayName": [
       { "zone": "Zone 1", "startTime": "8:00 AM", "duration": "15 minutes", "action": "water sprinkler" }
-    ],
-    // ...
+    ]
   },
   "summary": "Concise overall recommendations."
 }
@@ -173,7 +143,7 @@ Only output valid JSON with exactly these two keys and no extra text.
 `.trim();
 
   try {
-    // 6️⃣ Call OpenAI
+    // 5) Call OpenAI
     const completion = await openai.chat.completions.create({
       model: "o3-mini",
       messages: [
@@ -185,7 +155,7 @@ Only output valid JSON with exactly these two keys and no extra text.
     const aiRaw = completion.choices?.[0]?.message?.content;
     if (!aiRaw) throw new Error("No AI content returned");
 
-    // 7️⃣ Parse the JSON response
+    // 6) Parse JSON
     let parsed;
     try {
       parsed = JSON.parse(aiRaw);
@@ -194,13 +164,13 @@ Only output valid JSON with exactly these two keys and no extra text.
       throw new Error("AI response is not valid JSON");
     }
 
-    // 8️⃣ Save it to the user record
+    // 7) Save to user
     await User.findByIdAndUpdate(req.user.id, {
       aiSchedule: parsed,
       aiScheduleGeneratedAt: new Date()
     });
 
-    // 9️⃣ Email notification
+    // 8) Send email
     if (user.email) {
       await sendEmailNotification(
         user.email,
@@ -209,7 +179,7 @@ Only output valid JSON with exactly these two keys and no extra text.
       );
     }
 
-    // 🔟 Return the schedule
+    // 9) Return
     return res.json({ aiSchedule: parsed });
 
   } catch (err) {
@@ -224,7 +194,7 @@ Only output valid JSON with exactly these two keys and no extra text.
 /**
  * GET /ai-saved
  * - Requires auth.
- * - Returns the saved aiSchedule if it exists and was generated within the last 7 days.
+ * - Returns the saved aiSchedule if <7 days old, else empty.
  */
 router.get('/ai-saved', auth, async (req, res) => {
   const user = await User.findById(req.user.id);
@@ -233,7 +203,7 @@ router.get('/ai-saved', auth, async (req, res) => {
     !user.aiScheduleGeneratedAt ||
     (Date.now() - user.aiScheduleGeneratedAt.getTime()) > 7 * 24 * 60 * 60 * 1000
   ) {
-    return res.json({}); // none or expired
+    return res.json({});
   }
   return res.json({ aiSchedule: user.aiSchedule });
 });
