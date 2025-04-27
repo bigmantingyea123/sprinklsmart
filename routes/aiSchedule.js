@@ -16,52 +16,71 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+const BASE = process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
+
 /**
- * GET /
+ * GET /api/ai-schedule
  * - Requires auth.
- * - Expects query params: lat, lon, placements,
+ * - Query params: lat, lon, placements,
  *   availableWater, rootDepth, allowedDepletion,
  *   efficiency, vegetationType, nozzleType,
  *   soilType, exposure, slope, cropCoefficient, nozzleRate
- * - Fetches weather for next 6 days, builds prompt,
- *   calls OpenAI, parses JSON, saves to User,
- *   sends notification email, returns parsed schedule.
+ * - If any core setting is missing, loads it from user.systemSettings.
  */
 router.get('/', auth, async (req, res) => {
   const {
     lat, lon, placements,
-    availableWater, rootDepth, allowedDepletion,
-    efficiency, vegetationType, nozzleType,
-    soilType, exposure, slope,
-    cropCoefficient, nozzleRate
+    availableWater: qAW, rootDepth: qRD, allowedDepletion: qAD,
+    efficiency: qE, vegetationType: qVT, nozzleType: qNT,
+    soilType: qST, exposure: qX, slope: qS,
+    cropCoefficient: qCC, nozzleRate: qNR
   } = req.query;
 
-  // 1) Validate required params
   if (!lat || !lon) {
     return res.status(400).json({ error: "lat and lon query parameters are required" });
   }
+
+  // Load user settings if any are missing
+  const user = await User.findById(req.user.id).lean();
+  const ss = user.systemSettings || {};
+
+  const availableWater    = qAW ?? ss.availableWater;
+  const rootDepth         = qRD ?? ss.rootDepth;
+  const allowedDepletion  = qAD ?? ss.allowedDepletion;
+  const efficiency        = qE  ?? ss.efficiency;
+  const cropCoefficient   = qCC ?? ss.cropCoefficient;
+  const nozzleRate        = qNR ?? ss.nozzleRate;
+  const vegetationType    = qVT ?? ss.vegetationType;
+  const nozzleType        = qNT ?? ss.nozzleType;
+  const soilType          = qST ?? ss.soilType;
+  const exposure          = qX  ?? ss.exposure;
+  const slope             = qS  ?? ss.slope;
+
+  // Validate core settings
   if (
-    !availableWater || !rootDepth || !allowedDepletion ||
-    !efficiency || !vegetationType || !nozzleType ||
-    !soilType || !exposure || !slope
+    availableWater == null ||
+    rootDepth == null ||
+    allowedDepletion == null ||
+    efficiency == null ||
+    vegetationType == null ||
+    nozzleType == null ||
+    soilType == null ||
+    exposure == null ||
+    slope == null
   ) {
-    return res.status(400).json({ error: "All core system settings must be provided" });
+    return res.status(400).json({ error: "All core system settings must be provided or already saved" });
   }
 
-  // 2) Build 6-day weather summaries
+  // 1) Build 6-day weather summaries
   let dailyWeatherSummaries = {};
   try {
-    // use BASE_URL in production, fallback to localhost for dev
-    const baseUrl = process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
-    const weatherRes = await fetch(`${baseUrl}/api/weather?lat=${lat}&lon=${lon}`);
+    const weatherRes  = await fetch(`${BASE}/api/weather?lat=${lat}&lon=${lon}`);
     const weatherJson = weatherRes.ok ? await weatherRes.json() : null;
-
-    const dayNames = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
-    const start = new Date();
-    start.setDate(start.getDate() + 1);
+    const dayNames    = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+    const start       = new Date();
+    start.setDate(start.getDate()+1);
     start.setHours(0,0,0,0);
 
-    // init
     for (let i = 0; i < 6; i++) {
       const d = new Date(start);
       d.setDate(start.getDate() + i);
@@ -72,7 +91,10 @@ router.get('/', auth, async (req, res) => {
       weatherJson.list.forEach(f => {
         const dt = new Date(f.dt_txt);
         const dayName = dayNames[dt.getDay()];
-        if (dt >= start && dt < new Date(start.getTime() + 6*24*60*60*1000)) {
+        if (
+          dt >= start &&
+          dt < new Date(start.getTime() + 6*24*60*60*1000)
+        ) {
           const h = dt.getHours();
           if ((h >= 8 && h < 10) || (h >= 14 && h < 16)) {
             dailyWeatherSummaries[dayName].push(
@@ -91,13 +113,10 @@ router.get('/', auth, async (req, res) => {
     }
   } catch (err) {
     console.error("Weather fetch error:", err);
-    // leave dailyWeatherSummaries empty so AI sees "No forecast available."
-    Object.keys(dailyWeatherSummaries).forEach(d => {
-      dailyWeatherSummaries[d] = "No forecast available.";
-    });
+    dailyWeatherSummaries = { Error: "Weather data unavailable." };
   }
 
-  // 3) Build the AI prompt
+  // 2) Build the AI prompt
   const prompt = `
 I manage a smart sprinkler system with:
 - Lat/Lon: ${lat}, ${lon}
@@ -136,19 +155,19 @@ Only output valid JSON with exactly these two keys and no extra text.
 `.trim();
 
   try {
-    // 4) Call OpenAI
+    // 3) Call OpenAI
     const completion = await openai.chat.completions.create({
       model: "o3-mini",
       messages: [
         { role: "system", content: "You are an expert in irrigation systems, water conservation, and agriculture." },
-        { role: "user", content: prompt }
+        { role: "user",   content: prompt }
       ],
     });
 
     const aiRaw = completion.choices?.[0]?.message?.content;
     if (!aiRaw) throw new Error("No AI content returned");
 
-    // 5) Parse the JSON response
+    // 4) Parse it
     let parsed;
     try {
       parsed = JSON.parse(aiRaw);
@@ -157,15 +176,14 @@ Only output valid JSON with exactly these two keys and no extra text.
       throw new Error("AI response is not valid JSON");
     }
 
-    // 6) Save it to the user record
+    // 5) Save it on the user record
     await User.findByIdAndUpdate(req.user.id, {
       aiSchedule: parsed,
       aiScheduleGeneratedAt: new Date()
     });
 
-    // 7) Email notification
-    const user = await User.findById(req.user.id);
-    if (user?.email) {
+    // 6) Send email
+    if (user.email) {
       await sendEmailNotification(
         user.email,
         "New AI Watering Schedule Generated",
@@ -173,7 +191,7 @@ Only output valid JSON with exactly these two keys and no extra text.
       );
     }
 
-    // 8) Return the schedule
+    // 7) Return it
     return res.json({ aiSchedule: parsed });
 
   } catch (err) {
@@ -186,9 +204,8 @@ Only output valid JSON with exactly these two keys and no extra text.
 });
 
 /**
- * GET /ai-saved
- * - Requires auth.
- * - Returns the saved aiSchedule if it exists and was generated within the last 7 days.
+ * GET /api/ai-schedule/ai-saved
+ * - Returns the saved schedule if generated within 7 days.
  */
 router.get('/ai-saved', auth, async (req, res) => {
   const user = await User.findById(req.user.id);
@@ -197,7 +214,7 @@ router.get('/ai-saved', auth, async (req, res) => {
     !user.aiScheduleGeneratedAt ||
     (Date.now() - user.aiScheduleGeneratedAt.getTime()) > 7 * 24 * 60 * 60 * 1000
   ) {
-    return res.json({}); // none or expired
+    return res.json({});
   }
   return res.json({ aiSchedule: user.aiSchedule });
 });
