@@ -16,71 +16,49 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-const BASE = process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
-
 /**
- * GET /api/ai-schedule
+ * GET /
  * - Requires auth.
- * - Query params: lat, lon, placements,
+ * - Expects query params: lat, lon, placements,
  *   availableWater, rootDepth, allowedDepletion,
  *   efficiency, vegetationType, nozzleType,
  *   soilType, exposure, slope, cropCoefficient, nozzleRate
- * - If any core setting is missing, loads it from user.systemSettings.
+ * - Fetches weather for next 6 days, builds prompt,
+ *   calls OpenAI, parses JSON, saves to User,
+ *   sends notification email, returns parsed schedule.
  */
 router.get('/', auth, async (req, res) => {
   const {
     lat, lon, placements,
-    availableWater: qAW, rootDepth: qRD, allowedDepletion: qAD,
-    efficiency: qE, vegetationType: qVT, nozzleType: qNT,
-    soilType: qST, exposure: qX, slope: qS,
-    cropCoefficient: qCC, nozzleRate: qNR
+    availableWater, rootDepth, allowedDepletion,
+    efficiency, vegetationType, nozzleType,
+    soilType, exposure, slope,
+    cropCoefficient, nozzleRate
   } = req.query;
 
+  // Validate required params
   if (!lat || !lon) {
     return res.status(400).json({ error: "lat and lon query parameters are required" });
   }
-
-  // Load user settings if any are missing
-  const user = await User.findById(req.user.id).lean();
-  const ss = user.systemSettings || {};
-
-  const availableWater    = qAW ?? ss.availableWater;
-  const rootDepth         = qRD ?? ss.rootDepth;
-  const allowedDepletion  = qAD ?? ss.allowedDepletion;
-  const efficiency        = qE  ?? ss.efficiency;
-  const cropCoefficient   = qCC ?? ss.cropCoefficient;
-  const nozzleRate        = qNR ?? ss.nozzleRate;
-  const vegetationType    = qVT ?? ss.vegetationType;
-  const nozzleType        = qNT ?? ss.nozzleType;
-  const soilType          = qST ?? ss.soilType;
-  const exposure          = qX  ?? ss.exposure;
-  const slope             = qS  ?? ss.slope;
-
-  // Validate core settings
   if (
-    availableWater == null ||
-    rootDepth == null ||
-    allowedDepletion == null ||
-    efficiency == null ||
-    vegetationType == null ||
-    nozzleType == null ||
-    soilType == null ||
-    exposure == null ||
-    slope == null
+    !availableWater || !rootDepth || !allowedDepletion ||
+    !efficiency || !vegetationType || !nozzleType ||
+    !soilType || !exposure || !slope
   ) {
-    return res.status(400).json({ error: "All core system settings must be provided or already saved" });
+    return res.status(400).json({ error: "All core system settings must be provided" });
   }
 
   // 1) Build 6-day weather summaries
   let dailyWeatherSummaries = {};
   try {
-    const weatherRes  = await fetch(`${BASE}/api/weather?lat=${lat}&lon=${lon}`);
+    const weatherRes = await fetch(`http://localhost:3000/api/weather?lat=${lat}&lon=${lon}`);
     const weatherJson = weatherRes.ok ? await weatherRes.json() : null;
-    const dayNames    = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
-    const start       = new Date();
+    const dayNames = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+    const start = new Date();
     start.setDate(start.getDate()+1);
     start.setHours(0,0,0,0);
 
+    // Initialize next 6 days
     for (let i = 0; i < 6; i++) {
       const d = new Date(start);
       d.setDate(start.getDate() + i);
@@ -105,6 +83,7 @@ router.get('/', auth, async (req, res) => {
       });
     }
 
+    // Convert arrays to summary strings
     for (const day in dailyWeatherSummaries) {
       const arr = dailyWeatherSummaries[day];
       dailyWeatherSummaries[day] = arr.length
@@ -147,7 +126,8 @@ Generate a 6-day watering schedule (starting tomorrow) in JSON with exactly two 
   "dailySchedule": {
     "DayName": [
       { "zone": "Zone 1", "startTime": "8:00 AM", "duration": "15 minutes", "action": "water sprinkler" }
-    ]
+    ],
+    // ...
   },
   "summary": "Concise overall recommendations."
 }
@@ -160,14 +140,14 @@ Only output valid JSON with exactly these two keys and no extra text.
       model: "o3-mini",
       messages: [
         { role: "system", content: "You are an expert in irrigation systems, water conservation, and agriculture." },
-        { role: "user",   content: prompt }
+        { role: "user", content: prompt }
       ],
     });
 
     const aiRaw = completion.choices?.[0]?.message?.content;
     if (!aiRaw) throw new Error("No AI content returned");
 
-    // 4) Parse it
+    // 4) Parse the JSON response
     let parsed;
     try {
       parsed = JSON.parse(aiRaw);
@@ -176,14 +156,15 @@ Only output valid JSON with exactly these two keys and no extra text.
       throw new Error("AI response is not valid JSON");
     }
 
-    // 5) Save it on the user record
+    // 5) Save it to the user record
     await User.findByIdAndUpdate(req.user.id, {
       aiSchedule: parsed,
       aiScheduleGeneratedAt: new Date()
     });
 
-    // 6) Send email
-    if (user.email) {
+    // 6) Email notification
+    const user = await User.findById(req.user.id);
+    if (user?.email) {
       await sendEmailNotification(
         user.email,
         "New AI Watering Schedule Generated",
@@ -191,7 +172,7 @@ Only output valid JSON with exactly these two keys and no extra text.
       );
     }
 
-    // 7) Return it
+    // 7) Return the schedule
     return res.json({ aiSchedule: parsed });
 
   } catch (err) {
@@ -204,8 +185,9 @@ Only output valid JSON with exactly these two keys and no extra text.
 });
 
 /**
- * GET /api/ai-schedule/ai-saved
- * - Returns the saved schedule if generated within 7 days.
+ * GET /ai-saved
+ * - Requires auth.
+ * - Returns the saved aiSchedule if it exists and was generated within the last 7 days.
  */
 router.get('/ai-saved', auth, async (req, res) => {
   const user = await User.findById(req.user.id);
@@ -214,7 +196,7 @@ router.get('/ai-saved', auth, async (req, res) => {
     !user.aiScheduleGeneratedAt ||
     (Date.now() - user.aiScheduleGeneratedAt.getTime()) > 7 * 24 * 60 * 60 * 1000
   ) {
-    return res.json({});
+    return res.json({}); // none or expired
   }
   return res.json({ aiSchedule: user.aiSchedule });
 });
