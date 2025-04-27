@@ -1,4 +1,3 @@
-// routes/aiSchedule.js
 import express from 'express';
 import dotenv from 'dotenv';
 dotenv.config();
@@ -11,13 +10,13 @@ import { sendEmailNotification } from '../emailNotifications.js';
 
 const router = express.Router();
 
-// pick up your deployed URL (or localhost for dev)
-const BASE_URL = process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
-
 // Initialize OpenAI client
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
+
+// pick up your deployed URL, or default to localhost
+const BASE_URL = process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
 
 /**
  * GET /
@@ -54,8 +53,12 @@ router.get('/', auth, async (req, res) => {
   // 1) Build 6-day weather summaries
   let dailyWeatherSummaries = {};
   try {
-    const weatherRes = await fetch(`${BASE_URL}/api/weather?lat=${lat}&lon=${lon}`);
+    // ← here’s the only change: use BASE_URL instead of hard-coded localhost:3000
+    const weatherRes = await fetch(
+      `${BASE_URL}/api/weather?lat=${lat}&lon=${lon}`
+    );
     const weatherJson = weatherRes.ok ? await weatherRes.json() : null;
+
     const dayNames = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
     const start = new Date();
     start.setDate(start.getDate()+1);
