@@ -44,6 +44,7 @@ app.get('/', (req, res) => {
   res.send('Hello, welcome to your Smart Sprinkler App!');
 });
 
+// Import scheduler if applicable
 import './scheduler.js';
 
 app.listen(PORT, () => {
