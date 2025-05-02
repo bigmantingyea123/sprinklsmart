@@ -1,3 +1,4 @@
+// routes/aiSchedule.js
 import express from 'express';
 import dotenv from 'dotenv';
 dotenv.config();
@@ -9,99 +10,76 @@ import auth from '../middleware/auth.js';
 import { sendEmailNotification } from '../emailNotifications.js';
 
 const router = express.Router();
-
-// Initialize OpenAI client
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
-// pick up your deployed URL, or default to localhost
-const BASE_URL = process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const BASE_URL = process.env.BASE_URL || `http://localhost:${process.env.PORT||3000}`;
 
 /**
- * GET /
+ * POST /
  * - Requires auth.
- * - Expects query params: lat, lon, placements,
- *   availableWater, rootDepth, allowedDepletion,
- *   efficiency, vegetationType, nozzleType,
- *   soilType, exposure, slope, cropCoefficient, nozzleRate
- * - Fetches weather for next 6 days, builds prompt,
- *   calls OpenAI, parses JSON, saves to User,
- *   sends notification email, returns parsed schedule.
+ * - Expects JSON body:
+ *   { lat, lon, placements, availableWater, rootDepth, allowedDepletion,
+ *     efficiency, vegetationType, nozzleType, soilType, exposure, slope,
+ *     cropCoefficient, nozzleRate }
  */
-router.get('/', auth, async (req, res) => {
+router.post('/', auth, async (req, res) => {
   const {
     lat, lon, placements,
     availableWater, rootDepth, allowedDepletion,
     efficiency, vegetationType, nozzleType,
     soilType, exposure, slope,
     cropCoefficient, nozzleRate
-  } = req.query;
+  } = req.body;
 
-  // Validate required params
   if (!lat || !lon) {
-    return res.status(400).json({ error: "lat and lon query parameters are required" });
+    return res.status(400).json({ error: "lat and lon are required" });
   }
   if (
-    !availableWater || !rootDepth || !allowedDepletion ||
-    !efficiency || !vegetationType || !nozzleType ||
+    availableWater == null || rootDepth == null || allowedDepletion == null ||
+    efficiency == null || !vegetationType || !nozzleType ||
     !soilType || !exposure || !slope
   ) {
     return res.status(400).json({ error: "All core system settings must be provided" });
   }
 
-  // 1) Build 6-day weather summaries
+  // 1) Fetch weather, cache-busted
   let dailyWeatherSummaries = {};
   try {
-    // ← here’s the only change: use BASE_URL instead of hard-coded localhost:3000
     const weatherRes = await fetch(
-      `${BASE_URL}/api/weather?lat=${lat}&lon=${lon}`
+      `${BASE_URL}/api/weather?lat=${lat}&lon=${lon}&cb=${Date.now()}`
     );
     const weatherJson = weatherRes.ok ? await weatherRes.json() : null;
-
     const dayNames = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
-    const start = new Date();
-    start.setDate(start.getDate()+1);
-    start.setHours(0,0,0,0);
+    const start = new Date(); start.setDate(start.getDate()+1); start.setHours(0,0,0,0);
 
-    // Initialize next 6 days
-    for (let i = 0; i < 6; i++) {
-      const d = new Date(start);
-      d.setDate(start.getDate() + i);
-      dailyWeatherSummaries[dayNames[d.getDay()]] = [];
+    for (let i=0; i<6; i++) {
+      const d = new Date(start); d.setDate(start.getDate()+i);
+      dailyWeatherSummaries[ dayNames[d.getDay()] ] = [];
     }
 
     if (weatherJson?.list) {
       weatherJson.list.forEach(f => {
         const dt = new Date(f.dt_txt);
-        const dayName = dayNames[dt.getDay()];
-        if (
-          dt >= start &&
-          dt < new Date(start.getTime() + 6*24*60*60*1000)
-        ) {
+        const day = dayNames[dt.getDay()];
+        if (dt >= start && dt < new Date(start.getTime() + 6*24*60*60*1000)) {
           const h = dt.getHours();
-          if ((h >= 8 && h < 10) || (h >= 14 && h < 16)) {
-            dailyWeatherSummaries[dayName].push(
+          if ((h>=8&&h<10) || (h>=14&&h<16)) {
+            dailyWeatherSummaries[day].push(
               `At ${h}:00, temp ${f.main.temp}°C, ${f.weather[0].description}`
             );
           }
         }
       });
     }
-
-    // Convert arrays to summary strings
-    for (const day in dailyWeatherSummaries) {
-      const arr = dailyWeatherSummaries[day];
-      dailyWeatherSummaries[day] = arr.length
-        ? arr.join(" | ")
-        : "No forecast available.";
+    for (const d in dailyWeatherSummaries) {
+      const arr = dailyWeatherSummaries[d];
+      dailyWeatherSummaries[d] = arr.length ? arr.join(" | ") : "No forecast available.";
     }
   } catch (err) {
     console.error("Weather fetch error:", err);
     dailyWeatherSummaries = { Error: "Weather data unavailable." };
   }
 
-  // 2) Build the AI prompt
+  // 2) Build prompt
   const prompt = `
 I manage a smart sprinkler system with:
 - Lat/Lon: ${lat}, ${lon}
@@ -123,18 +101,11 @@ Placements (grid):
 - ${placements}
 
 Weather for next 6 days:
-${Object.entries(dailyWeatherSummaries)
-   .map(([d, s]) => `- ${d}: ${s}`)
-   .join("\n")}
+${Object.entries(dailyWeatherSummaries).map(([d,s])=>`- ${d}: ${s}`).join("\n")}
 
 Generate a 6-day watering schedule (starting tomorrow) in JSON with exactly two keys:
 {
-  "dailySchedule": {
-    "DayName": [
-      { "zone": "Zone 1", "startTime": "8:00 AM", "duration": "15 minutes", "action": "water sprinkler" }
-    ],
-    // ...
-  },
+  "dailySchedule": { /* … */ },
   "summary": "Concise overall recommendations."
 }
 Only output valid JSON with exactly these two keys and no extra text.
@@ -149,36 +120,28 @@ Only output valid JSON with exactly these two keys and no extra text.
         { role: "user", content: prompt }
       ],
     });
-
     const aiRaw = completion.choices?.[0]?.message?.content;
-    if (!aiRaw) throw new Error("No AI content returned");
+    if (!aiRaw) throw new Error("No AI content");
 
-    // 4) Parse the JSON response
+    // 4) Parse
     let parsed;
-    try {
-      parsed = JSON.parse(aiRaw);
-    } catch (pe) {
-      console.error("AI JSON parse error:", pe, aiRaw);
-      throw new Error("AI response is not valid JSON");
-    }
+    try { parsed = JSON.parse(aiRaw); }
+    catch (pe) { console.error("JSON parse:", pe, aiRaw); throw new Error("Invalid JSON"); }
 
-    // 5) Save it to the user record
+    // 5) Save & 6) Email
     await User.findByIdAndUpdate(req.user.id, {
-      aiSchedule: parsed,
-      aiScheduleGeneratedAt: new Date()
+      aiSchedule: parsed, aiScheduleGeneratedAt: new Date()
     });
-
-    // 6) Email notification
     const user = await User.findById(req.user.id);
     if (user?.email) {
       await sendEmailNotification(
         user.email,
         "New AI Watering Schedule Generated",
-        "Your new watering schedule is ready. Check your dashboard for details."
+        "Your new watering schedule is ready. Check your dashboard."
       );
     }
 
-    // 7) Return the schedule
+    // 7) Return
     return res.json({ aiSchedule: parsed });
 
   } catch (err) {
@@ -190,21 +153,20 @@ Only output valid JSON with exactly these two keys and no extra text.
   }
 });
 
-/**
- * GET /ai-saved
- * - Requires auth.
- * - Returns the saved aiSchedule if it exists and was generated within the last 7 days.
- */
+/** GET /ai-saved (unchanged) **/
 router.get('/ai-saved', auth, async (req, res) => {
-  const user = await User.findById(req.user.id);
-  if (
-    !user?.aiSchedule ||
-    !user.aiScheduleGeneratedAt ||
-    (Date.now() - user.aiScheduleGeneratedAt.getTime()) > 7 * 24 * 60 * 60 * 1000
-  ) {
-    return res.json({}); // none or expired
+  try {
+    const user = await User.findById(req.user.id);
+    if (
+      !user?.aiSchedule ||
+      !user.aiScheduleGeneratedAt ||
+      (Date.now() - user.aiScheduleGeneratedAt.getTime() > 7*24*60*60*1000)
+    ) return res.json({});
+    return res.json({ aiSchedule: user.aiSchedule });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
   }
-  return res.json({ aiSchedule: user.aiSchedule });
 });
 
 export default router;
