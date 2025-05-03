@@ -96,17 +96,17 @@ I manage a smart sprinkler system with:
 - Lat/Lon: ${lat}, ${lon}
 
 System Settings:
-- Available Water: ${availableWater} in
-- Root Depth: ${rootDepth} in
-- Allowed Depletion: ${allowedDepletion}%
-- Efficiency: ${efficiency}%
-- Crop Coefficient: ${cropCoefficient}
-- Nozzle Rate: ${nozzleRate} in/hr
-- Vegetation: ${vegetationType}
-- Nozzle: ${nozzleType}
-- Soil: ${soilType}
-- Exposure: ${exposure}
-- Slope: ${slope}
+- Available Water: 4 in
+- Root Depth: 8 in
+- Allowed Depletion: 50%
+- Efficiency: 50%
+- Crop Coefficient: 0.8
+- Nozzle Rate: 0.8 in/hr
+- Vegetation: bermudagrass
+- Nozzle: pop up spray
+- Soil: Loam or sandy loam
+- Exposure: Full Sun
+- Slope: Flat
 
 Placements (grid):
 - ${placements}
