@@ -11,6 +11,7 @@ import { sendEmailNotification } from '../emailNotifications.js';
 
 const router = express.Router();
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// make sure BASE_URL points at your deployed API:
 const BASE_URL = process.env.BASE_URL || `http://localhost:${process.env.PORT||3000}`;
 
 /**
@@ -30,6 +31,7 @@ router.post('/', auth, async (req, res) => {
     cropCoefficient, nozzleRate
   } = req.body;
 
+  // 1) validate
   if (!lat || !lon) {
     return res.status(400).json({ error: "lat and lon are required" });
   }
@@ -41,7 +43,7 @@ router.post('/', auth, async (req, res) => {
     return res.status(400).json({ error: "All core system settings must be provided" });
   }
 
-  // 1) Fetch weather, cache-busted
+  // 2) fetch & summarize weather
   let dailyWeatherSummaries = {};
   try {
     const weatherRes = await fetch(
@@ -51,8 +53,10 @@ router.post('/', auth, async (req, res) => {
     const dayNames = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
     const start = new Date(); start.setDate(start.getDate()+1); start.setHours(0,0,0,0);
 
-    for (let i=0; i<6; i++) {
-      const d = new Date(start); d.setDate(start.getDate()+i);
+    // init 6 days
+    for (let i = 0; i < 6; i++) {
+      const d = new Date(start);
+      d.setDate(start.getDate() + i);
       dailyWeatherSummaries[ dayNames[d.getDay()] ] = [];
     }
 
@@ -60,9 +64,12 @@ router.post('/', auth, async (req, res) => {
       weatherJson.list.forEach(f => {
         const dt = new Date(f.dt_txt);
         const day = dayNames[dt.getDay()];
-        if (dt >= start && dt < new Date(start.getTime() + 6*24*60*60*1000)) {
+        if (
+          dt >= start &&
+          dt < new Date(start.getTime() + 6*24*60*60*1000)
+        ) {
           const h = dt.getHours();
-          if ((h>=8&&h<10) || (h>=14&&h<16)) {
+          if ((h >= 8 && h < 10) || (h >= 14 && h < 16)) {
             dailyWeatherSummaries[day].push(
               `At ${h}:00, temp ${f.main.temp}°C, ${f.weather[0].description}`
             );
@@ -70,32 +77,36 @@ router.post('/', auth, async (req, res) => {
         }
       });
     }
+
+    // turn into strings
     for (const d in dailyWeatherSummaries) {
       const arr = dailyWeatherSummaries[d];
-      dailyWeatherSummaries[d] = arr.length ? arr.join(" | ") : "No forecast available.";
+      dailyWeatherSummaries[d] = arr.length
+        ? arr.join(" | ")
+        : "No forecast available.";
     }
   } catch (err) {
     console.error("Weather fetch error:", err);
     dailyWeatherSummaries = { Error: "Weather data unavailable." };
   }
 
-  // 2) Build prompt
+  // 3) build AI prompt
   const prompt = `
 I manage a smart sprinkler system with:
 - Lat/Lon: ${lat}, ${lon}
 
 System Settings:
-- Available Water: 4 in
-- Root Depth: 8 in
-- Allowed Depletion: 50%
-- Efficiency: 50%
-- Crop Coefficient: 0.8
-- Nozzle Rate: 0.8 in/hr
-- Vegetation: Bermudagrass
-- Nozzle: Pop up spray
-- Soil: Loam or sandy-loam
-- Exposure: Full sun
-- Slope: Flat
+- Available Water: ${availableWater} in
+- Root Depth: ${rootDepth} in
+- Allowed Depletion: ${allowedDepletion}%
+- Efficiency: ${efficiency}%
+- Crop Coefficient: ${cropCoefficient}
+- Nozzle Rate: ${nozzleRate} in/hr
+- Vegetation: ${vegetationType}
+- Nozzle: ${nozzleType}
+- Soil: ${soilType}
+- Exposure: ${exposure}
+- Slope: ${slope}
 
 Placements (grid):
 - ${placements}
@@ -112,7 +123,7 @@ Only output valid JSON with exactly these two keys and no extra text.
 `.trim();
 
   try {
-    // 3) Call OpenAI
+    // 4) call OpenAI
     const completion = await openai.chat.completions.create({
       model: "o3-mini",
       messages: [
@@ -123,14 +134,19 @@ Only output valid JSON with exactly these two keys and no extra text.
     const aiRaw = completion.choices?.[0]?.message?.content;
     if (!aiRaw) throw new Error("No AI content");
 
-    // 4) Parse
+    // 5) parse
     let parsed;
-    try { parsed = JSON.parse(aiRaw); }
-    catch (pe) { console.error("JSON parse:", pe, aiRaw); throw new Error("Invalid JSON"); }
+    try {
+      parsed = JSON.parse(aiRaw);
+    } catch (pe) {
+      console.error("JSON parse error:", pe, aiRaw);
+      throw new Error("Invalid JSON from AI");
+    }
 
-    // 5) Save & 6) Email
+    // 6) save & email
     await User.findByIdAndUpdate(req.user.id, {
-      aiSchedule: parsed, aiScheduleGeneratedAt: new Date()
+      aiSchedule: parsed,
+      aiScheduleGeneratedAt: new Date()
     });
     const user = await User.findById(req.user.id);
     if (user?.email) {
@@ -141,7 +157,7 @@ Only output valid JSON with exactly these two keys and no extra text.
       );
     }
 
-    // 7) Return
+    // 7) return
     return res.json({ aiSchedule: parsed });
 
   } catch (err) {
